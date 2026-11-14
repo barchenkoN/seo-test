@@ -170,3 +170,25 @@ def test_restart_marks_interrupted_rows_failed(tmp_path):
                   "error": None, "attempts": 1, "updated_at": 0}]}]))
     m = JobManager(FormSubmitter(TwoCaptcha("k")), data_dir=tmp_path)
     assert m.get("j1").rows[0].status == "failed"
+
+
+def test_dotenv_windows_notepad(tmp_path, monkeypatch):
+    from bot.config import _load_dotenv
+    for i, (name, raw) in enumerate(((".env", "﻿TWOCAPTCHA_API_KEY=k1\r\n".encode("utf-8")),
+                      (".env", "TWOCAPTCHA_API_KEY=k2\r\n".encode("utf-16")),
+                      (".env.txt", b"TWOCAPTCHA_API_KEY=k3\n"))):
+        d = tmp_path / str(i)
+        d.mkdir()
+        (d / name).write_bytes(raw)
+        monkeypatch.delenv("TWOCAPTCHA_API_KEY", raising=False)
+        assert _load_dotenv(d / ".env")
+        import os
+        assert os.environ["TWOCAPTCHA_API_KEY"] == f"k{i + 1}"
+
+
+def test_key_from_ui(env):
+    site, client, manager, solver = env
+    solver.api_key = ""
+    assert client.post("/api/settings", json={"twocaptcha_key": "bad-key"}).status_code == 400
+    assert client.post("/api/settings", json={"twocaptcha_key": "good-key"}).get_json() == {"balance": 3.5}
+    assert solver.api_key == "good-key" and (manager.data_dir / "settings.json").is_file()

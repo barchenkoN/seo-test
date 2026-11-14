@@ -1,6 +1,7 @@
 """Web UI + JSON API. Start with `python app.py` and open http://localhost:8000"""
 import csv
 import io
+import json
 import logging
 import threading
 import time
@@ -25,6 +26,12 @@ def create_app(manager: JobManager | None = None, solver: TwoCaptcha | None = No
     app.config["MAX_CONTENT_LENGTH"] = config.MAX_FILE_SIZE + 2 * 1024 * 1024
     solver = solver or TwoCaptcha(config.TWOCAPTCHA_API_KEY)
     manager = manager or JobManager(FormSubmitter(solver))
+    settings_path = manager.data_dir / "settings.json"
+    if not solver.api_key and settings_path.is_file():  # key saved from the UI earlier
+        try:
+            solver.api_key = json.loads(settings_path.read_text(encoding="utf-8")).get("twocaptcha_key", "")
+        except (OSError, ValueError):
+            pass
     meta_cache: dict = {"at": 0.0, "threats": DEFAULT_THREATS, "live": False}
     meta_lock = threading.Lock()
 
@@ -58,6 +65,20 @@ def create_app(manager: JobManager | None = None, solver: TwoCaptcha | None = No
             return jsonify(balance=solver.balance())
         except CaptchaError as exc:
             return jsonify(error=str(exc)), 502
+
+    @app.post("/api/settings")
+    def save_settings():
+        key = ((request.get_json(silent=True) or {}).get("twocaptcha_key") or "").strip()
+        if not key:
+            return jsonify(error="пустой ключ"), 400
+        old, solver.api_key = solver.api_key, key
+        try:
+            bal = solver.balance()
+        except CaptchaError as exc:
+            solver.api_key = old
+            return jsonify(error=str(exc)), 400
+        settings_path.write_text(json.dumps({"twocaptcha_key": key}), encoding="utf-8")
+        return jsonify(balance=bal)
 
     @app.post("/api/jobs")
     def create_job():
@@ -145,7 +166,10 @@ def create_app(manager: JobManager | None = None, solver: TwoCaptcha | None = No
 if __name__ == "__main__":
     from waitress import serve
 
-    if not config.TWOCAPTCHA_API_KEY:
+    logging.info("Файл настроек: %s", config.ENV_FILE or f"не найден ({config.ROOT / '.env'})")
+    if config.TWOCAPTCHA_API_KEY:
+        logging.info("Ключ 2captcha: %s…%s", config.TWOCAPTCHA_API_KEY[:4], config.TWOCAPTCHA_API_KEY[-4:])
+    else:
         logging.warning("TWOCAPTCHA_API_KEY не задан — капча решаться не будет. См. README.")
     logging.info("Открыть: http://localhost:%s  (форма: %s)", config.PORT, config.TARGET_URL)
     serve(create_app(), host=config.HOST, port=config.PORT, threads=8)

@@ -4,20 +4,32 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _load_dotenv(path: Path) -> None:
-    """Minimal .env loader so `python app.py` works without extra dependencies."""
-    if not path.is_file():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+def _load_dotenv(path: Path) -> Path | None:
+    """Minimal .env loader so `python app.py` works without extra dependencies.
+
+    Tolerates what Windows Notepad does: a UTF-8 BOM / UTF-16, and a hidden ".txt" extension.
+    """
+    for candidate in (path, path.with_name(path.name + ".txt")):
+        if candidate.is_file():
+            break
+    else:
+        return None
+    raw = candidate.read_bytes()
+    text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
+    for line in text.splitlines():
+        line = line.strip().lstrip("\ufeff").strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         value = value.split(" #", 1)[0].strip().strip('"').strip("'")
-        os.environ.setdefault(key.strip(), value)
+        if key.strip().startswith("export "):
+            key = key.strip()[7:]
+        if value and not os.environ.get(key.strip()):
+            os.environ[key.strip()] = value
+    return candidate
 
 
-_load_dotenv(ROOT / ".env")
+ENV_FILE = _load_dotenv(ROOT / ".env")
 
 
 def _int(name: str, default: int) -> int:

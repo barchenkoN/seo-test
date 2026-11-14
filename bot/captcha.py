@@ -54,6 +54,8 @@ class TwoCaptcha:
         return data
 
     def balance(self) -> float:
+        if not self.api_key:
+            raise CaptchaError("ключ не задан", fatal=True)
         return float(self._call("getBalance", {}).get("balance", 0))
 
     def solve_recaptcha_v2(self, site_key: str, page_url: str, user_agent: str | None = None) -> tuple[str, int]:

@@ -114,6 +114,8 @@ class MockSite:
 
         @app.post("/2captcha/getBalance")
         def balance():
+            if request.get_json()["clientKey"] != "good-key":
+                return {"errorId": 1, "errorCode": "ERROR_KEY_DOES_NOT_EXIST"}
             return {"errorId": 0, "balance": self.balance}
 
     def start(self) -> str:
