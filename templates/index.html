@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Массовая отправка жалоб</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #fff; --text: #1d2330; --muted: #677085; --border: #dde1e8;
+    --accent: #2f6fd6; --accent-hover: #255bb3; --ok: #1e8e4f; --ok-bg: #e5f5ec; --err: #c93636; --err-bg: #fcebeb;
+    --run: #a86500; --run-bg: #fff3dc; --q-bg: #eef0f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #11151c; --card: #1a2029; --text: #e6e9ef; --muted: #8f99ab; --border: #2c3442;
+      --accent: #5b93ef; --accent-hover: #74a5f2; --ok: #4cc683; --ok-bg: #173325; --err: #f07a7a; --err-bg: #3a1f22;
+      --run: #f0b14d; --run-bg: #3a2d14; --q-bg: #252c38; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 16px 60px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; justify-content: space-between; margin-bottom: 18px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 16px; margin: 0 0 14px; }
+  .muted { color: var(--muted); }
+  .status-line { font-size: 13px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .grid { display: grid; grid-template-columns: minmax(0, 400px) minmax(0, 1fr); gap: 18px; align-items: start; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 18px; }
+  label.t { display: block; font-weight: 600; font-size: 13px; margin: 0 0 6px; }
+  .field { margin-bottom: 16px; }
+  input[type=text], select, textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--card); color: var(--text); font: inherit; }
+  textarea { resize: vertical; }
+  #targets { min-height: 150px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .seg { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .seg label { flex: 1; text-align: center; padding: 7px 0; cursor: pointer; border-right: 1px solid var(--border); }
+  .seg label:last-child { border-right: 0; }
+  .seg input { display: none; }
+  .seg input:checked + span { color: var(--accent); font-weight: 600; }
+  .seg label:has(input:checked) { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .ferr { font-size: 12px; color: var(--err); margin-top: 4px; white-space: pre-line; }
+  button { font: inherit; border-radius: 6px; cursor: pointer; border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 6px 12px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; padding: 9px 18px; font-weight: 600; width: 100%; }
+  button.primary:hover { background: var(--accent-hover); }
+  button:disabled { opacity: .55; cursor: default; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .toolbar select { width: auto; max-width: 100%; }
+  .progress { height: 6px; background: var(--q-bg); border-radius: 3px; overflow: hidden; display: flex; margin-bottom: 8px; }
+  .progress i { display: block; height: 100%; }
+  .counts { font-size: 13px; margin-bottom: 12px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .tbl-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.tgt { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; min-width: 160px; }
+  td.tgt input { font-family: inherit; font-size: 13px; padding: 4px 6px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .b-success { background: var(--ok-bg); color: var(--ok); }
+  .b-failed { background: var(--err-bg); color: var(--err); }
+  .b-running { background: var(--run-bg); color: var(--run); }
+  .b-queued { background: var(--q-bg); color: var(--muted); }
+  .code { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 600; cursor: copy; }
+  .errtxt { color: var(--err); }
+  .empty { color: var(--muted); padding: 30px 0; text-align: center; }
+  .banner { background: var(--err-bg); color: var(--err); border-radius: 6px; padding: 8px 12px; margin-bottom: 14px; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Массовая отправка жалоб</h1>
+    <div class="status-line">
+      <span>Форма: <a href="{{ target_url }}" target="_blank" rel="noopener">{{ target_url }}</a></span>
+      <span id="balance" class="muted">2captcha: …</span>
+    </div>
+  </header>
+  <div id="banner" class="banner" hidden></div>
+
+  <div class="grid">
+    <form id="form" class="card" novalidate>
+      <h2>Новая отправка</h2>
+      <div class="field">
+        <label class="t">Submission Type</label>
+        <div class="seg" id="types">
+          <label><input type="radio" name="submission_type" value="domain" checked><span>Domain</span></label>
+          <label><input type="radio" name="submission_type" value="ip"><span>IP</span></label>
+          <label><input type="radio" name="submission_type" value="url"><span>URL</span></label>
+        </div>
+      </div>
+      <div class="field">
+        <label class="t" for="targets">Цели <span class="muted" id="tcount"></span></label>
+        <textarea id="targets" name="targets" spellcheck="false" placeholder="example.com&#10;example.org"></textarea>
+        <div class="hint">По одной на строку. Каждая строка — отдельная отправка формы.</div>
+        <div class="ferr" id="err-targets"></div>
+      </div>
+      <div class="field">
+        <label class="t" for="threat_type">Threat Type</label>
+        <select id="threat_type" name="threat_type"><option value="">Выберите…</option></select>
+        <div class="ferr" id="err-threat_type"></div>
+      </div>
+      <div class="field">
+        <label class="t" for="reason">Reason <span class="muted" id="rcount">0/2000</span></label>
+        <textarea id="reason" name="reason" rows="4" maxlength="2000"></textarea>
+        <div class="ferr" id="err-reason"></div>
+      </div>
+      <div class="field">
+        <label class="t" for="attachment">Файл</label>
+        <input type="file" id="attachment" name="attachment" accept=".jpg,.jpeg,.png,.pdf">
+        <div class="hint">Необязательно. JPG, JPEG, PNG или PDF до 2 МБ. Прикрепляется к каждой отправке.</div>
+        <div class="ferr" id="err-attachment"></div>
+      </div>
+      <button class="primary" id="submit" type="submit">Отправить</button>
+    </form>
+
+    <section class="card">
+      <div class="toolbar">
+        <h2 style="margin:0;flex:1">Результаты</h2>
+        <select id="jobs"></select>
+      </div>
+      <div id="result"><div class="empty">Отправок пока нет</div></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const STATUS = {queued: "в очереди", running: "отправляется", success: "отправлено", failed: "ошибка"};
+let currentJob = null, pollTimer = null;
+
+async function api(url, opts) {
+  const r = await fetch(url, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), {data});
+  return data;
+}
+
+async function loadMeta() {
+  const m = await api("/api/meta");
+  const sel = $("#threat_type");
+  m.threats.forEach(t => sel.add(new Option(t, t)));
+  if (!m.captcha_key_set) showBanner("Не задан ключ 2captcha (TWOCAPTCHA_API_KEY) — отправки не будут работать. См. README.");
+  api("/api/balance").then(b => $("#balance").textContent = `2captcha: $${b.balance.toFixed(2)}`)
+    .catch(e => $("#balance").textContent = `2captcha: ${e.message}`);
+}
+function showBanner(t) { const b = $("#banner"); b.textContent = t; b.hidden = !t; }
+
+// ---- live validation of target lines ----
+let vTimer;
+function kind() { return document.querySelector("input[name=submission_type]:checked").value; }
+function validateTargets() {
+  clearTimeout(vTimer);
+  vTimer = setTimeout(async () => {
+    const res = await api("/api/validate", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({submission_type: kind(), targets: $("#targets").value})});
+    const bad = res.filter(r => r.error);
+    $("#tcount").textContent = res.length ? `(${res.length}${bad.length ? `, с ошибками: ${bad.length}` : ""})` : "";
+    $("#err-targets").textContent = bad.slice(0, 5).map(r => `${r.target} — ${r.error}`).join("\n")
+      + (bad.length > 5 ? `\n… и ещё ${bad.length - 5}` : "")
+      + (bad.length ? "\nСтроки с ошибками не будут отправлены (их можно исправить в результатах)." : "");
+  }, 300);
+}
+$("#targets").addEventListener("input", validateTargets);
+document.querySelectorAll("input[name=submission_type]").forEach(r => r.addEventListener("change", validateTargets));
+$("#reason").addEventListener("input", e => $("#rcount").textContent = `${e.target.value.length}/2000`);
+$("#attachment").addEventListener("change", e => {
+  const f = e.target.files[0]; let err = "";
+  if (f && !/\.(jpe?g|png|pdf)$/i.test(f.name)) err = "Разрешены только JPG, JPEG, PNG или PDF";
+  else if (f && f.size > 2 * 1024 * 1024) err = `Файл больше 2 МБ (${(f.size / 1048576).toFixed(2)} МБ)`;
+  $("#err-attachment").textContent = err;
+  if (err) e.target.value = "";
+});
+
+// ---- submit ----
+$("#form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  document.querySelectorAll(".ferr").forEach(el => { if (el.id !== "err-targets") el.textContent = ""; });
+  const btn = $("#submit"); btn.disabled = true; btn.textContent = "Создаю задачу…";
+  try {
+    const job = await api("/api/jobs", {method: "POST", body: new FormData(e.target)});
+    $("#targets").value = ""; validateTargets();
+    await refreshJobs(job.id);
+  } catch (err) {
+    const errs = err.data?.errors || {};
+    for (const [k, v] of Object.entries(errs)) { const el = $(`#err-${k}`); if (el) el.textContent = v; }
+    if (!Object.keys(errs).length) showBanner(err.message);
+  } finally { btn.disabled = false; btn.textContent = "Отправить"; }
+});
+
+// ---- results ----
+async function refreshJobs(selectId) {
+  const jobs = await api("/api/jobs");
+  const sel = $("#jobs"); sel.innerHTML = "";
+  jobs.forEach(j => sel.add(new Option(
+    `${new Date(j.created_at * 1000).toLocaleString()} · ${j.submission_type.toUpperCase()} · ${j.success}/${j.total}`, j.id)));
+  sel.hidden = !jobs.length;
+  const id = selectId || currentJob || jobs[0]?.id;
+  if (id) { sel.value = id; showJob(id); }
+}
+$("#jobs").addEventListener("change", e => showJob(e.target.value));
+
+async function showJob(id) {
+  currentJob = id; clearTimeout(pollTimer);
+  const job = await api(`/api/jobs/${id}`);
+  if (currentJob !== id) return;
+  renderJob(job);
+  const s = job.summary;
+  if (s.queued + s.running > 0) pollTimer = setTimeout(() => showJob(id), 1500);
+  else refreshJobListLabel(job);
+}
+function refreshJobListLabel(job) {
+  const opt = [...$("#jobs").options].find(o => o.value === job.id);
+  if (opt) opt.text = opt.text.replace(/\d+\/\d+$/, `${job.summary.success}/${job.summary.total}`);
+}
+
+function renderJob(job) {
+  const s = job.summary, pct = n => `${(n / s.total * 100).toFixed(1)}%`;
+  const editing = {};  // keep what the operator is typing while the table re-renders
+  document.querySelectorAll("input.edit").forEach(i => editing[i.dataset.idx] = i.value);
+  const focused = document.activeElement?.classList.contains("edit") ? document.activeElement.dataset.idx : null;
+
+  $("#result").innerHTML = `
+    <div class="progress"><i style="width:${pct(s.success)};background:var(--ok)"></i><i style="width:${pct(s.failed)};background:var(--err)"></i><i style="width:${pct(s.running)};background:var(--run)"></i></div>
+    <div class="counts">
+      <span>Всего: <b>${s.total}</b></span><span style="color:var(--ok)">Отправлено: <b>${s.success}</b></span>
+      <span style="color:var(--err)">Ошибки: <b>${s.failed}</b></span><span class="muted">В работе: <b>${s.queued + s.running}</b></span>
+    </div>
+    <div class="toolbar">
+      <span class="muted">${esc(job.threat_type)}${job.attachment_name ? " · 📎 " + esc(job.attachment_name) : ""}</span>
+      <span style="flex:1"></span>
+      ${s.failed ? `<button id="retry-all">Повторить неудачные (${s.failed})</button>` : ""}
+      ${s.success ? `<button id="copy-codes">Скопировать коды</button>` : ""}
+      <a href="/api/jobs/${job.id}.csv"><button>CSV</button></a>
+    </div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>#</th><th>Цель</th><th>Статус</th><th>Код / причина ошибки</th><th></th></tr></thead>
+      <tbody>${job.rows.map(r => `
+        <tr>
+          <td class="muted">${r.idx + 1}</td>
+          <td class="tgt">${r.status === "failed"
+            ? `<input type="text" class="edit" data-idx="${r.idx}" value="${esc(editing[r.idx] ?? r.target)}" title="Можно исправить перед повтором">`
+            : esc(r.target)}</td>
+          <td><span class="badge b-${r.status}">${STATUS[r.status]}</span>
+              ${r.attempts > 1 ? `<div class="muted" style="font-size:11px">попыток: ${r.attempts}</div>` : ""}</td>
+          <td>${r.confirmation ? `<span class="code" title="Нажмите, чтобы скопировать">${esc(r.confirmation)}</span>`
+               : r.error ? `<span class="errtxt">${esc(r.error)}</span>` : `<span class="muted">${esc(r.step)}</span>`}</td>
+          <td>${r.status === "failed" ? `<button class="retry" data-idx="${r.idx}">Повторить</button>` : ""}</td>
+        </tr>`).join("")}</tbody>
+    </table></div>`;
+
+  if (focused !== null) document.querySelector(`input.edit[data-idx="${focused}"]`)?.focus();
+  document.querySelectorAll(".code").forEach(el => el.onclick = () => navigator.clipboard?.writeText(el.textContent));
+  $("#copy-codes")?.addEventListener("click", () => navigator.clipboard?.writeText(
+    job.rows.filter(r => r.confirmation).map(r => `${r.target}\t${r.confirmation}`).join("\n")));
+  $("#retry-all")?.addEventListener("click", () => retry(job.id, null));
+  document.querySelectorAll("button.retry").forEach(b => b.onclick = () => retry(job.id, [+b.dataset.idx]));
+}
+
+async function retry(jobId, idxs) {
+  const edits = {};
+  document.querySelectorAll("input.edit").forEach(i => edits[i.dataset.idx] = i.value);
+  await api(`/api/jobs/${jobId}/retry`, {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({idxs, edits})});
+  showJob(jobId);
+}
+
+loadMeta().catch(e => showBanner("Не удалось загрузить настройки: " + e.message));
+refreshJobs();
+</script>
+</body>
+</html>

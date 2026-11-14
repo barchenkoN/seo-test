@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TWOCAPTCHA_API_KEY: ${TWOCAPTCHA_API_KEY:-}
+      PORT: 8000
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
