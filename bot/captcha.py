@@ -68,7 +68,7 @@ class TwoCaptcha:
         task_id = self._call("createTask", {"task": task})["taskId"]
 
         deadline = time.monotonic() + self.timeout
-        time.sleep(min(self.poll_interval * 3, 15))  # reCAPTCHA is never solved faster than ~15s
+        time.sleep(min(self.poll_interval * 2, 10))  # reCAPTCHA is practically never solved in under 10 s
         while True:
             data = self._call("getTaskResult", {"taskId": task_id})
             if data.get("status") == "ready":

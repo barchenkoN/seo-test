@@ -9,6 +9,8 @@ Flow for one target:
 """
 import logging
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from urllib.parse import urljoin
 
@@ -26,10 +28,13 @@ HIDDEN_STYLE_RE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden|left\s
 
 
 class SubmitError(Exception):
-    def __init__(self, message: str, retryable: bool = False, bad_captcha: bool = False):
+    def __init__(self, message: str, retryable: bool = False, bad_captcha: bool = False,
+                 throttled: bool = False, response_html: str | None = None):
         super().__init__(message)
         self.retryable = retryable
         self.bad_captcha = bad_captcha
+        self.throttled = throttled          # the site is pushing back (429 / Cloudflare): slow everyone down
+        self.response_html = response_html
 
 
 @dataclass
@@ -178,6 +183,20 @@ class FormSubmitter:
     def __init__(self, solver: TwoCaptcha, page_url: str = config.TARGET_URL):
         self.solver = solver
         self.page_url = page_url
+        self._cooldown_until = 0.0
+        self._cooldown_lock = threading.Lock()
+
+    def cool_down(self, seconds: float) -> None:
+        """Pause every worker (not just the one that got the 429), so the site sees the load actually drop."""
+        with self._cooldown_lock:
+            self._cooldown_until = max(self._cooldown_until, time.monotonic() + seconds)
+        log.warning("site is throttling, pausing all submissions for %.0f s", seconds)
+
+    def wait_cooldown(self, on_step=lambda msg: None) -> None:
+        delay = self._cooldown_until - time.monotonic()
+        if delay > 0:
+            on_step(f"пауза {delay:.0f} с: сайт ограничивает запросы")
+            time.sleep(delay)
 
     def _new_session(self) -> requests.Session:
         s = requests.Session()
@@ -195,12 +214,15 @@ class FormSubmitter:
         except requests.RequestException as exc:
             raise SubmitError(f"сайт недоступен: {exc}", retryable=True) from exc
         if resp.status_code != 200:
-            raise SubmitError(f"страница формы вернула HTTP {resp.status_code}", retryable=resp.status_code >= 429)
+            throttled = resp.status_code in (403, 429, 503)
+            raise SubmitError(f"страница формы вернула HTTP {resp.status_code}", retryable=resp.status_code >= 429
+                              or throttled, throttled=throttled, response_html=resp.text)
         return parse_form(resp.text, resp.url)
 
     def submit(self, submission_type: str, target: str, threat_type: str, reason: str,
                attachment: Attachment | None, on_step=lambda msg: None) -> str:
         """Submits one target. Returns the confirmation code or raises SubmitError/CaptchaError."""
+        self.wait_cooldown(on_step)
         session = self._new_session()
         on_step("загрузка формы")
         form = self.fetch_form(session)
@@ -250,15 +272,18 @@ class FormSubmitter:
             return code
 
         low = error.lower()
+        html = resp.text
         if "captcha" in low or "капч" in low or "robot" in low:
             if task_id:
                 self.solver.report_bad(task_id)
-            raise SubmitError(f"сайт не принял капчу: {error}", retryable=True, bad_captcha=True)
+            raise SubmitError(f"сайт не принял капчу: {error}", retryable=True, bad_captcha=True, response_html=html)
         if any(w in low for w in ("token", "expired", "session", "csrf")):
-            raise SubmitError(f"истёк токен формы: {error}", retryable=True)
-        if resp.status_code >= 500 or resp.status_code == 429 or "cloudflare" in low:
-            raise SubmitError(error, retryable=True)
-        raise SubmitError(error)
+            raise SubmitError(f"истёк токен формы: {error}", retryable=True, response_html=html)
+        throttled = resp.status_code == 429 or "cloudflare" in low or any(
+            w in low for w in ("too many", "rate limit", "slow down", "try again later"))
+        if throttled or resp.status_code >= 500:
+            raise SubmitError(error, retryable=True, throttled=throttled, response_html=html)
+        raise SubmitError(error, response_html=html)
 
 
 def submit_with_retries(submitter: FormSubmitter, max_attempts: int, on_attempt=lambda n: None,
@@ -276,5 +301,9 @@ def submit_with_retries(submitter: FormSubmitter, max_attempts: int, on_attempt=
             last = exc
             if not exc.retryable:
                 raise
+            if exc.throttled:
+                submitter.cool_down(config.THROTTLE_PAUSE * attempt)
         log.warning("attempt %s/%s failed: %s", attempt, max_attempts, last)
+        if attempt < max_attempts and not getattr(last, "bad_captcha", False):
+            time.sleep(config.RETRY_BACKOFF * attempt)  # 5 s, 10 s, ... before trying the site again
     raise last  # type: ignore[misc]

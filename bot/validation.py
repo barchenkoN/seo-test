@@ -83,3 +83,29 @@ def validate_attachment(filename: str, data: bytes) -> tuple[str | None, str | N
     if not signatures[mime]:
         return "содержимое файла не соответствует расширению", None
     return None, mime
+
+
+def normalize(kind: str, value: str) -> str:
+    """Key used to spot the same target written twice (case, trailing dot, IPv6 spelling)."""
+    value = value.strip()
+    if kind == "domain":
+        return value.rstrip(".").lower()
+    if kind == "ip":
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError:
+            return value
+    if kind == "url":
+        parts = urlsplit(value)
+        return parts._replace(scheme=parts.scheme.lower(), netloc=parts.netloc.lower()).geturl()
+    return value
+
+
+def dedupe(kind: str, targets: list[str]) -> tuple[list[str], int]:
+    seen, unique = set(), []
+    for t in targets:
+        key = normalize(kind, t)
+        if key not in seen:
+            seen.add(key)
+            unique.append(t)
+    return unique, len(targets) - len(unique)

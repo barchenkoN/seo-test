@@ -47,6 +47,7 @@ class MockSite:
         self.submissions: list[dict] = []
         self.captcha_tasks: dict[int, str] = {}
         self.bad_tokens_left = 0       # how many next captcha solutions should be rejected by the site
+        self.throttle_left = 0         # how many next submissions get "429 Too Many Requests"
         self.reported_bad: list[int] = []
         self.balance = 3.5
         self._ids = itertools.count(1000)
@@ -67,6 +68,11 @@ class MockSite:
 
         @app.post("/submit")
         def submit():
+            with self.lock:
+                throttle = self.throttle_left > 0
+                self.throttle_left -= throttle
+            if throttle:
+                return '<div class="alert">Too many requests, try again later.</div>', 429
             f = request.form
             if not session.get("token") or f.get("form_token") != session.pop("token"):
                 return self._page("Your session has expired. Please try again."), 400

@@ -64,6 +64,8 @@ def env(tmp_path, monkeypatch):
     site = MockSite()
     base = site.start()
     monkeypatch.setattr(config, "HTTP_TIMEOUT", 5)
+    monkeypatch.setattr(config, "RETRY_BACKOFF", 0)
+    monkeypatch.setattr(config, "THROTTLE_PAUSE", 0.2)
     solver = TwoCaptcha("good-key", api_url=f"{base}/2captcha", poll_interval=0)
     manager = JobManager(FormSubmitter(solver, page_url=f"{base}/"), data_dir=tmp_path, workers=3, max_attempts=3)
     client = create_app(manager, solver).test_client()
@@ -135,11 +137,18 @@ def test_site_error_and_manual_retry_with_edit(env):
 
 def test_bad_captcha_key_is_fatal(env):
     site, client, manager, solver = env
-    solver.api_key = "bad-key"
-    job_id = client.post("/api/jobs", data={"submission_type": "domain", "targets": "x.example.com",
-                                            "threat_type": "Spam", "reason": "r"}).get_json()["id"]
-    row = wait_done(client, job_id)["rows"][0]
-    assert row["status"] == "failed" and "неверный ключ 2captcha" in row["error"] and row["attempts"] == 1
+    solver.api_key = "bad-key"   # caught before the job starts, nothing is queued
+    resp = client.post("/api/jobs", data={"submission_type": "domain", "targets": "x.example.com",
+                                          "threat_type": "Spam", "reason": "r"})
+    assert resp.status_code == 400 and "неверный ключ 2captcha" in resp.get_json()["error"]
+    assert client.get("/api/jobs").get_json() == [] and site.submissions == []
+
+    # key revoked while a job is running: the row fails at once instead of retrying
+    from bot.submitter import FormSubmitter, submit_with_retries
+    from bot.captcha import CaptchaError
+    with pytest.raises(CaptchaError, match="неверный ключ"):
+        submit_with_retries(manager.submitter, 3, submission_type="domain", target="x.example.com",
+                            threat_type="Spam", reason="r", attachment=None)
 
 
 def test_form_validation_errors(env):
@@ -192,3 +201,82 @@ def test_key_from_ui(env):
     assert client.post("/api/settings", json={"twocaptcha_key": "bad-key"}).status_code == 400
     assert client.post("/api/settings", json={"twocaptcha_key": "good-key"}).get_json() == {"balance": 3.5}
     assert solver.api_key == "good-key" and (manager.data_dir / "settings.json").is_file()
+
+
+def post_job(client, targets, kind="domain", **extra):
+    return client.post("/api/jobs", data={"submission_type": kind, "targets": targets,
+                                          "threat_type": "Spam", "reason": "r", **extra})
+
+
+def test_duplicates_are_sent_once(env):
+    site, client, *_ = env
+    resp = post_job(client, "a.example.com\nA.Example.com.\nb.example.com\na.example.com")
+    job = wait_done(client, resp.get_json()["id"])
+    assert [r["target"] for r in job["rows"]] == ["a.example.com", "b.example.com"]
+    assert job["duplicates"] == 2 and len(site.submissions) == 2
+    v = client.post("/api/validate", json={"submission_type": "ip", "targets": "2001:db8::1\n2001:DB8:0::1\nbad"})
+    assert v.get_json()["duplicates"] == 1 and v.get_json()["valid"] == 1
+
+
+def test_balance_checked_before_start(env):
+    site, client, *_ = env
+    site.balance = 0.004
+    resp = post_job(client, "a.example.com\nb.example.com")
+    assert resp.status_code == 400 and "нужно примерно $0.01" in resp.get_json()["error"]
+    assert site.submissions == []
+    resp = post_job(client, "a.example.com")                       # one captcha fits the balance
+    assert resp.status_code == 201
+    wait_done(client, resp.get_json()["id"])
+
+
+def test_cancel_then_retry_never_sends_twice(env, tmp_path):
+    site, client, manager, solver = env
+    manager.pool.shutdown(wait=True)
+    from concurrent.futures import ThreadPoolExecutor
+    manager.pool = ThreadPoolExecutor(max_workers=1)
+    targets = [f"t{i}.example.com" for i in range(8)]
+    job_id = post_job(client, "\n".join(targets)).get_json()["id"]
+    cancelled = client.post(f"/api/jobs/{job_id}/cancel").get_json()["cancelled"]
+    assert cancelled >= 5
+    job = wait_done(client, job_id)
+    assert sum(r["error"] == "отменено оператором" for r in job["rows"]) == cancelled
+    client.post(f"/api/jobs/{job_id}/retry", json={"idxs": None})   # stale queued tasks must stay no-ops
+    job = wait_done(client, job_id)
+    assert all(r["status"] == "success" for r in job["rows"])
+    assert sorted(s["target"] for s in site.submissions) == sorted(targets)
+
+
+def test_site_response_is_saved_for_failed_rows(env):
+    site, client, *_ = env
+    job_id = post_job(client, "evil.invalid").get_json()["id"]
+    row = wait_done(client, job_id)["rows"][0]
+    assert row["has_response"]
+    resp = client.get(f"/api/jobs/{job_id}/rows/0/response")
+    assert resp.mimetype == "text/plain" and "This domain cannot be reported." in resp.get_data(as_text=True)
+
+
+def test_rate_limit_pauses_and_recovers(env):
+    site, client, manager, _ = env
+    site.throttle_left = 1
+    started = time.time()
+    row = wait_done(client, post_job(client, "a.example.com").get_json()["id"])["rows"][0]
+    assert row["status"] == "success" and row["attempts"] == 2
+    assert time.time() - started >= 0.2          # waited out the global pause
+
+
+def test_password(tmp_path, env):
+    _, _, manager, solver = env
+    client = create_app(manager, solver, password="s3cret").test_client()
+    assert client.get("/").status_code == 401
+    import base64
+    auth = {"Authorization": "Basic " + base64.b64encode(b"any:s3cret").decode()}
+    assert client.get("/", headers=auth).status_code == 200
+    assert client.get("/api/jobs", headers={"Authorization": "Basic " + base64.b64encode(b"x:bad").decode()}).status_code == 401
+
+
+def test_export_all(env):
+    _, client, *_ = env
+    for t in ("a.example.com", "b.example.com"):
+        wait_done(client, post_job(client, t).get_json()["id"])
+    text = client.get("/api/export.csv").get_data(as_text=True)
+    assert text.count("success") == 2 and text.startswith("\ufeffjob,")

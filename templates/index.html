@@ -65,6 +65,9 @@
   .code { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 600; cursor: copy; }
   .errtxt { color: var(--err); }
   .empty { color: var(--muted); padding: 30px 0; text-align: center; }
+  .estimate { font-size: 12px; color: var(--muted); margin-top: 8px; text-align: center; min-height: 18px; }
+  .resp { font-size: 12px; margin-left: 6px; color: var(--muted); }
+  .filter { font-size: 13px; display: flex; align-items: center; gap: 6px; cursor: pointer; }
   .banner { background: var(--err-bg); color: var(--err); border-radius: 6px; padding: 8px 12px; margin-bottom: 14px; font-size: 13px; }
 </style>
 </head>
@@ -75,6 +78,7 @@
     <div class="status-line">
       <span>Форма: <a href="{{ target_url }}" target="_blank" rel="noopener">{{ target_url }}</a></span>
       <span id="balance" class="muted">2captcha: …</span>
+      <a href="/api/export.csv" class="muted">Все результаты (CSV)</a>
     </div>
   </header>
   <div id="banner" class="banner" hidden></div>
@@ -118,6 +122,7 @@
         <div class="ferr" id="err-attachment"></div>
       </div>
       <button class="primary" id="submit" type="submit">Отправить</button>
+      <div class="estimate" id="estimate"></div>
     </form>
 
     <section class="card">
@@ -134,7 +139,8 @@
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const STATUS = {queued: "в очереди", running: "отправляется", success: "отправлено", failed: "ошибка"};
-let currentJob = null, pollTimer = null;
+let currentJob = null, pollTimer = null, lastRendered = "", onlyErrors = false;
+let META = {concurrency: 5, captcha_price: 0.003, avg_seconds: 35};
 
 async function api(url, opts) {
   const r = await fetch(url, opts);
@@ -145,6 +151,7 @@ async function api(url, opts) {
 
 async function loadMeta() {
   const m = await api("/api/meta");
+  META = m;
   const sel = $("#threat_type");
   m.threats.forEach(t => sel.add(new Option(t, t)));
   $("#keyform").hidden = m.captcha_key_set;
@@ -171,14 +178,24 @@ function kind() { return document.querySelector("input[name=submission_type]:che
 function validateTargets() {
   clearTimeout(vTimer);
   vTimer = setTimeout(async () => {
-    const res = await api("/api/validate", {method: "POST", headers: {"Content-Type": "application/json"},
+    const v = await api("/api/validate", {method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({submission_type: kind(), targets: $("#targets").value})});
-    const bad = res.filter(r => r.error);
-    $("#tcount").textContent = res.length ? `(${res.length}${bad.length ? `, с ошибками: ${bad.length}` : ""})` : "";
+    const res = v.rows, bad = res.filter(r => r.error);
+    const parts = [];
+    if (bad.length) parts.push(`с ошибками: ${bad.length}`);
+    if (v.duplicates) parts.push(`повторов убрано: ${v.duplicates}`);
+    $("#tcount").textContent = res.length ? `(${res.length}${parts.length ? ", " + parts.join(", ") : ""})` : "";
+    showEstimate(v.valid);
     $("#err-targets").textContent = bad.slice(0, 5).map(r => `${r.target} — ${r.error}`).join("\n")
       + (bad.length > 5 ? `\n… и ещё ${bad.length - 5}` : "")
       + (bad.length ? "\nСтроки с ошибками не будут отправлены (их можно исправить в результатах)." : "");
   }, 300);
+}
+function showEstimate(n) {
+  if (!n) { $("#estimate").textContent = ""; return; }
+  const minutes = Math.ceil(n / META.concurrency) * META.avg_seconds / 60;
+  const time = minutes < 1 ? "меньше минуты" : minutes < 60 ? `≈ ${Math.ceil(minutes)} мин` : `≈ ${(minutes / 60).toFixed(1)} ч`;
+  $("#estimate").textContent = `${n} отправок · ≈ $${(n * META.captcha_price).toFixed(2)} · ${time}`;
 }
 $("#targets").addEventListener("input", validateTargets);
 document.querySelectorAll("input[name=submission_type]").forEach(r => r.addEventListener("change", validateTargets));
@@ -217,13 +234,14 @@ async function refreshJobs(selectId) {
   const id = selectId || currentJob || jobs[0]?.id;
   if (id) { sel.value = id; showJob(id); }
 }
-$("#jobs").addEventListener("change", e => showJob(e.target.value));
+$("#jobs").addEventListener("change", e => { lastRendered = ""; showJob(e.target.value); });
 
 async function showJob(id) {
   currentJob = id; clearTimeout(pollTimer);
   const job = await api(`/api/jobs/${id}`);
   if (currentJob !== id) return;
-  renderJob(job);
+  const key = JSON.stringify(job) + onlyErrors;
+  if (key !== lastRendered) { lastRendered = key; renderJob(job); }  // no re-render (and no lag) when nothing changed
   const s = job.summary;
   if (s.queued + s.running > 0) pollTimer = setTimeout(() => showJob(id), 1500);
   else refreshJobListLabel(job);
@@ -246,24 +264,30 @@ function renderJob(job) {
       <span style="color:var(--err)">Ошибки: <b>${s.failed}</b></span><span class="muted">В работе: <b>${s.queued + s.running}</b></span>
     </div>
     <div class="toolbar">
-      <span class="muted">${esc(job.threat_type)}${job.attachment_name ? " · 📎 " + esc(job.attachment_name) : ""}</span>
+      <span class="muted">${esc(job.threat_type)}${job.attachment_name ? " · 📎 " + esc(job.attachment_name) : ""}${job.duplicates ? ` · повторов убрано: ${job.duplicates}` : ""}</span>
       <span style="flex:1"></span>
+      ${s.failed ? `<label class="filter"><input type="checkbox" id="only-errors" ${onlyErrors ? "checked" : ""}>только ошибки</label>` : ""}
+      ${s.queued ? `<button id="cancel">Остановить (${s.queued})</button>` : ""}
       ${s.failed ? `<button id="retry-all">Повторить неудачные (${s.failed})</button>` : ""}
       ${s.success ? `<button id="copy-codes">Скопировать коды</button>` : ""}
       <a href="/api/jobs/${job.id}.csv"><button>CSV</button></a>
     </div>
     <div class="tbl-wrap"><table>
       <thead><tr><th>#</th><th>Цель</th><th>Статус</th><th>Код / причина ошибки</th><th></th></tr></thead>
-      <tbody>${job.rows.map(r => `
+      <tbody>${job.rows.filter(r => !onlyErrors || r.status === "failed").map(r => `
         <tr>
           <td class="muted">${r.idx + 1}</td>
           <td class="tgt">${r.status === "failed"
             ? `<input type="text" class="edit" data-idx="${r.idx}" value="${esc(editing[r.idx] ?? r.target)}" title="Можно исправить перед повтором">`
             : esc(r.target)}</td>
-          <td><span class="badge b-${r.status}">${STATUS[r.status]}</span>
+          <td>${r.error === "отменено оператором" ? `<span class="badge b-queued">отменено</span>`
+               : `<span class="badge b-${r.status}">${STATUS[r.status]}</span>`}
               ${r.attempts > 1 ? `<div class="muted" style="font-size:11px">попыток: ${r.attempts}</div>` : ""}</td>
           <td>${r.confirmation ? `<span class="code" title="Нажмите, чтобы скопировать">${esc(r.confirmation)}</span>`
-               : r.error ? `<span class="errtxt">${esc(r.error)}</span>` : `<span class="muted">${esc(r.step)}</span>`}</td>
+               : r.error === "отменено оператором" ? `<span class="muted">${esc(r.error)}</span>`
+               : r.error ? `<span class="errtxt">${esc(r.error)}</span>${r.has_response
+                 ? `<a class="resp" href="/api/jobs/${job.id}/rows/${r.idx}/response" target="_blank">ответ сайта</a>` : ""}`
+               : `<span class="muted">${esc(r.step)}</span>`}</td>
           <td>${r.status === "failed" ? `<button class="retry" data-idx="${r.idx}">Повторить</button>` : ""}</td>
         </tr>`).join("")}</tbody>
     </table></div>`;
@@ -273,6 +297,10 @@ function renderJob(job) {
   $("#copy-codes")?.addEventListener("click", () => navigator.clipboard?.writeText(
     job.rows.filter(r => r.confirmation).map(r => `${r.target}\t${r.confirmation}`).join("\n")));
   $("#retry-all")?.addEventListener("click", () => retry(job.id, null));
+  $("#only-errors")?.addEventListener("change", e => { onlyErrors = e.target.checked; lastRendered = ""; showJob(job.id); });
+  $("#cancel")?.addEventListener("click", async () => {
+    await api(`/api/jobs/${job.id}/cancel`, {method: "POST"}); showJob(job.id);
+  });
   document.querySelectorAll("button.retry").forEach(b => b.onclick = () => retry(job.id, [+b.dataset.idx]));
 }
 
